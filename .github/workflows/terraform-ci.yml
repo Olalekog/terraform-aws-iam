@@ -152,14 +152,13 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # Requires an OIDC-trusted IAM role ARN in this repo's
-      # AWS_TERRATEST_ROLE_ARN secret with permission to create/destroy the
-      # resources under test.
+      # Requires an OIDC-trusted IAM role ARN in this repo's AWS_TOKEN
+      # secret, with permission to create/destroy the resources under test.
       - name: Configure AWS credentials
         if: steps.check.outputs.present == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_TERRATEST_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_TOKEN }}
           aws-region: us-east-1
 
       - name: Run Terratest
