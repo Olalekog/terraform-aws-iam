@@ -90,6 +90,7 @@ resource "aws_iam_role_policy" "kms_access" {
   policy = data.aws_iam_policy_document.kms_access[0].json
 }
 
+
 resource "aws_iam_instance_profile" "this" {
   count       = var.create_instance_profile ? 1 : 0
   name        = var.use_name_prefix ? null : var.name
