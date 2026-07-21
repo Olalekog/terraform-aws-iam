@@ -1,0 +1,170 @@
+# Canonical CI template for every terraform-aws-* module in this Module
+# directory. Each module is its own GitHub repo, so this file is copied
+# verbatim into <module>/.github/workflows/terraform-ci.yml — it is not run
+# from here. When you change the pipeline, edit this copy first, then re-sync
+# it into each module repo.
+#
+# Designed to degrade gracefully for brand-new/stub modules (a repo with only
+# a README.md and no .tf files yet): every job skips itself instead of
+# failing when the thing it checks doesn't exist.
+name: Terraform CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.7.5"
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff
+
+  validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Validate root module and any examples/*
+        run: |
+          set -euo pipefail
+          dirs="."
+          if [ -d examples ]; then
+            dirs="$dirs $(find examples -mindepth 1 -maxdepth 1 -type d)"
+          fi
+          for d in $dirs; do
+            if ls "$d"/*.tf >/dev/null 2>&1; then
+              echo "::group::terraform validate $d"
+              terraform -chdir="$d" init -backend=false -input=false
+              terraform -chdir="$d" validate
+              echo "::endgroup::"
+            else
+              echo "Skipping $d (no .tf files yet)"
+            fi
+          done
+
+  lint:
+    name: tflint
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Run tflint
+        run: |
+          if [ -f .tflint.hcl ]; then
+            tflint --init
+          fi
+          tflint --recursive --format compact
+
+  security:
+    name: checkov
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          soft_fail: true
+
+  native-tests:
+    name: terraform test (mocked)
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Run native Terraform tests
+        run: |
+          if [ -d tests ] && ls tests/*.tftest.hcl >/dev/null 2>&1; then
+            terraform init -backend=false
+            terraform test
+          else
+            echo "No *.tftest.hcl files found, skipping."
+          fi
+
+  terratest:
+    name: Terratest (real AWS integration)
+    runs-on: ubuntu-latest
+    needs: [validate, native-tests]
+    # Real AWS resources get created/destroyed here, so this only runs on
+    # pushes to dev or on demand — not on every dev -> main PR.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a Go/Terratest suite
+        id: check
+        run: |
+          if [ -f test/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.check.outputs.present == 'true'
+        with:
+          go-version: "1.21"
+
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.check.outputs.present == 'true'
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Requires an OIDC-trusted IAM role ARN in this repo's
+      # AWS_TERRATEST_ROLE_ARN secret with permission to create/destroy the
+      # resources under test.
+      - name: Configure AWS credentials
+        if: steps.check.outputs.present == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRATEST_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Run Terratest
+        if: steps.check.outputs.present == 'true'
+        working-directory: test
+        run: |
+          go mod tidy
+          go test -v -timeout 30m ./...
