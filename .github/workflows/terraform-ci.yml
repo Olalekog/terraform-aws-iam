@@ -8,7 +8,6 @@
 # a README.md and no .tf files yet): every job skips itself instead of
 # failing when the thing it checks doesn't exist.
 name: Terraform CI
-
 on:
   push:
     branches: [dev]
